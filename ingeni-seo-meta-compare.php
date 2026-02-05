@@ -2,9 +2,12 @@
 /**
  * Plugin Name: Ingeni SEO Meta Compare
  * Description: Compare SEO meta tags between this site and another domain for all published pages.
- * Version: 2026.01
+ * Version: 2026.02
  * Author: Bruce McKinnon - ingeni.net
  */
+
+// v2026.01 - 4 Feb 2026 - Initial release
+// v2026.02 - 5 Feb 2026 - Improved canonical URL checking
 
 
 if (!defined('ABSPATH')) exit;
@@ -12,9 +15,23 @@ if (!defined('ABSPATH')) exit;
 // Include support for PluginUpdateChecker
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 
+
+if (!function_exists("ingeni_seo_meta_log")) {
+	function ingeni_seo_meta_log($msg) {
+		$upload_dir = wp_upload_dir();
+		$logFile = $upload_dir['basedir'] . '/' . 'ingeni_seo_meta_log.txt';
+		date_default_timezone_set('Australia/Sydney');
+
+		// Now write out to the file
+		$log_handle = fopen($logFile, "a");
+		if ($log_handle !== false) {
+			fwrite($log_handle, date("H:i:s").": ".$msg."\r\n");
+			fclose($log_handle);
+		}
+	}
+}
+
 class SEO_Meta_Compare {
-
-
     private $report_key = 'seo_meta_compare_report';
     private $option_key = 'seo_meta_compare_settings';
 
@@ -175,7 +192,7 @@ class SEO_Meta_Compare {
 
         $path = wp_parse_url(get_permalink($post), PHP_URL_PATH);
 
-        $src = rtrim($settings['original'], '/') . $path;
+        $src = rtrim($original, '/') . $path;
         $tgt = rtrim($target, '/') . $path;
 
         $source = $this->get_meta($src);
@@ -189,8 +206,7 @@ class SEO_Meta_Compare {
             ]);
         }
 
-        $diffs = $this->compare($source, $target_meta, $normalize, $canonical_only);
-
+        $diffs = $this->compare($source, $target, $normalize, $canonical_only, $path);
 
         $report = get_transient($this->report_key);
         if (!$report) {
@@ -204,6 +220,7 @@ class SEO_Meta_Compare {
             'description_diff' => $source['description'] !== $target['description'],
             'robots_diff'      => $source['robots'] !== $target['robots'],
             'canonical_diff'   => $source['canonical'] !== $target['canonical'],
+            'keywords_diff'    => $source['keywords'] !== $target['keywords'],
             'source_canonical' => $source['canonical'],
             'target_canonical' => $target['canonical'],
         ];
@@ -220,6 +237,7 @@ class SEO_Meta_Compare {
     private function get_meta($url) {
         $r = wp_remote_get($url, ['timeout' => 10]);
         if (is_wp_error($r) || wp_remote_retrieve_response_code($r) !== 200) {
+            ingeni_seo_meta_log('get_meta() ERROR: '.$url);
             return false;
         }
 
@@ -234,6 +252,7 @@ class SEO_Meta_Compare {
             'description' => '',
             'robots'      => '',
             'canonical'   => '',
+            'keywords'    => '',
         ];
 
         if ($dom->getElementsByTagName('title')->length) {
@@ -255,14 +274,62 @@ class SEO_Meta_Compare {
             }
         }
 
+        $meta['keywords'] = $this->get_ldjson_keywords($dom);
+
         return $meta;
     }
+
+    // Extract the keywords form the LD+JSON
+    private function get_ldjson_keywords(DOMDocument $dom): string {
+        $xpath = new DOMXPath($dom);
+        $scripts = $xpath->query('//script[@type="application/ld+json"]');
+
+        $keywords = [];
+
+        foreach ($scripts as $script) {
+            $json = trim($script->textContent);
+            if ($json === '') {
+                continue;
+            }
+
+            $data = json_decode($json, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                continue;
+            }
+
+            // Normalize to iterable items
+            $items = [];
+
+            if (isset($data['@graph']) && is_array($data['@graph'])) {
+                $items = $data['@graph'];
+            } elseif (isset($data[0])) {
+                $items = $data;
+            } else {
+                $items = [$data];
+            }
+
+            foreach ($items as $item) {
+                if (empty($item['keywords'])) {
+                    continue;
+                }
+                if (is_array($item['keywords'])) {
+                    $keywords = array_merge($keywords, $item['keywords']);
+                } else {
+                    $keywords = array_merge($keywords, array_map('trim', explode(',', $item['keywords'])) );
+                }
+            }
+        }
+        // Clean + stringify
+        $keywords = array_values(array_unique(array_filter($keywords)));
+        return strtolower( implode(', ', $keywords) );
+    }
+
 
     private function normalize($url) {
         return rtrim(preg_replace('#^https?://#', '', $url), '/');
     }
 
-    private function compare($src, $tgt, $normalize, $canonical_only = false) {
+    private function compare($src, $tgt, $normalize, $canonical_only = false, $path = '') {
         $diffs = [];
 
         if ($canonical_only) {
@@ -282,8 +349,16 @@ class SEO_Meta_Compare {
         }
 
         foreach ($src as $k => $v) {
-            $a = $normalize ? $this->normalize($v) : $v;
-            $b = $normalize ? $this->normalize($tgt[$k]) : $tgt[$k];
+
+            if ( $k == 'canonical' ) {
+                $a = parse_url($a, PHP_URL_PATH);
+                $b = parse_url($b, PHP_URL_PATH);
+
+            } else {
+                $a = $normalize ? $this->normalize($v) : $v;
+                $b = $normalize ? $this->normalize($tgt[$k]) : $tgt[$k];
+            }
+
             if ($a !== $b) {
                 $diffs[] =
                     strtoupper($k) . ":<br>
@@ -318,6 +393,7 @@ class SEO_Meta_Compare {
             'Description Diff',
             'Robots Diff',
             'Canonical Diff',
+            'Keywords Diff',
             'Source Canonical',
             'Target Canonical'
         ]);

@@ -12,7 +12,7 @@ Requires at least: 3.8
 
 Tested up to: 5.2.2
 
-Stable tag: 2026.01
+Stable tag: 2026.02
 
 
 
@@ -45,4 +45,5 @@ Quickly compare pages or posts on one site with another, checking for missing UR
 == Changelog ==
 
 
-v2026.01 - Initial public release.
+v2026.01 - 4 Feb 2026 - Initial public release.
+v2026.02 - 5 Feb 2026 - Improved canonical URL checking
